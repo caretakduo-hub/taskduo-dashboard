@@ -1,3 +1,4 @@
+import {handleVideo,VIDEO_MODEL} from './fal-video.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 const cors={'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'authorization, x-client-info, apikey, content-type','Access-Control-Allow-Methods':'POST, OPTIONS'};
 const reply=(data:unknown,status=200)=>Response.json(data,{status,headers:cors});
@@ -10,12 +11,13 @@ Deno.serve(async req=>{
  const sb=createClient(Deno.env.get('SUPABASE_URL')!,Deno.env.get('SUPABASE_ANON_KEY')!,{global:{headers:{Authorization:auth}}});
  const {data:{user},error}=await sb.auth.getUser();if(error||!user)return reply({error:'Sign in again.'},401);
  const body=await req.json();const {data:ws}=await sb.from('workspaces').select('id').eq('id',body.workspace_id).single();const section=body.action==='ad'?'ads':body.action==='plan'?'socialmanage':'posting';const {data:access}=await sb.rpc('has_workspace_access',{w:body.workspace_id,section_name:section,write_access:body.action!=='capabilities'});if(!ws||!access)return reply({error:'Workspace access denied.'},403);
- const key=Deno.env.get('OPENAI_API_KEY');if(body.action==='capabilities')return reply({content:!!key,images:!!key,video:false,publishing:false});
+ const key=Deno.env.get('OPENAI_API_KEY');if(body.action==='capabilities')return reply({content:!!key,images:!!key,video:!!Deno.env.get('FAL_KEY'),video_provider:'fal.ai',video_model:VIDEO_MODEL,publishing:false});
+ const admin=createClient(Deno.env.get('SUPABASE_URL')!,Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
+ if(String(body.action).startsWith('video_'))return await handleVideo(body,admin,user.id,Deno.env.get('FAL_KEY'),reply);
  if(!key)return reply({error:'OpenAI generation is not configured. Add OPENAI_API_KEY to the Supabase function secrets.'},503);
  if(!formats[body.platform]||(body.action!=='ad'&&!formats[body.platform]?.includes(body.format)))return reply({error:'Unsupported channel or format.'},400);
  if(!['content','image','ad','plan','script','speech'].includes(body.action))return reply({error:'Unknown generation action.'},400);
  // Atomic per-user limit avoids repeated concurrent generation requests.
- const admin=createClient(Deno.env.get('SUPABASE_URL')!,Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
  const {data:allowed,error:limitError}=await admin.rpc('claim_ai_generation',{caller_id:user.id});if(limitError||!allowed)return reply({error:'Generation limit reached. Please try again in a minute.'},429);
  const id=crypto.randomUUID();const model=body.action==='image'?(Deno.env.get('OPENAI_IMAGE_MODEL')||'gpt-image-2.5-flare'):(Deno.env.get('OPENAI_TEXT_MODEL')||'gpt-4.1-mini');
  let payload:Record<string,unknown>,endpoint:string;
