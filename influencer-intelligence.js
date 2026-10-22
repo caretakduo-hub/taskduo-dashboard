@@ -2,7 +2,61 @@ let influencerCurrentResults=[],influencerCurrentFilters=null;
 let influencerSearchGeneration=0;
 function resetInfluencerSearch(){influencerSearchGeneration++;influencerCurrentResults=[];influencerCurrentFilters=null;document.getElementById('infKeyword').value='';document.getElementById('infNiche').value='';document.getElementById('infCountry').value='';document.getElementById('infMinFollowers').value='0';document.getElementById('infSimilar').value='';document.getElementById('infResultCount').value='20';document.querySelectorAll('.infPlatform').forEach(x=>x.checked=true);const msg=document.getElementById('infMessage');msg.textContent='';msg.classList.add('hidden');document.getElementById('infResults').innerHTML='<div class="card"><p class="muted">Enter search criteria to begin a new search.</p></div>';document.getElementById('infSavePanel')?.classList.add('hidden');document.getElementById('infKeyword').focus()}
 /* Influencer Intelligence: use only real provider results, never fabricate creator data. */
-async function discoverInfluencers(){const requestGeneration=++influencerSearchGeneration;const keyword=document.getElementById('infKeyword').value.trim(),niche=document.getElementById('infNiche').value,country=document.getElementById('infCountry').value,follower_range=document.getElementById('infMinFollowers').value,similar=document.getElementById('infSimilar').value.trim(),result_count=Number(document.getElementById('infResultCount').value),platforms=[...document.querySelectorAll('.infPlatform:checked')].map(x=>x.value),msg=document.getElementById('infMessage'),results=document.getElementById('infResults');msg.classList.remove('hidden');if((!keyword&&!niche&&!similar)||!platforms.length){msg.textContent='Enter a topic or similar profile and choose at least one platform.';return}if(similar){try{const u=new URL(similar);if(!['https:','http:'].includes(u.protocol))throw Error('invalid')}catch{msg.textContent='Enter a valid public profile URL.';return}}if(similar&&!keyword&&!niche){msg.textContent='Similar-account discovery is not currently supported. Add a keyword or niche to search for creators instead.';results.innerHTML='<div class="card"><p class="muted">The channel link is valid, but it cannot currently be used to identify similar accounts. Add a keyword to run a standard YouTube search.</p></div>';return}msg.textContent='Searching selected platforms…';results.innerHTML='<div class="card"><p class="muted">Collecting real creator profiles. Apify searches may take a few minutes…</p></div>';try{let response;let runs=null;let allCreators=[];let notice='';for(let attempt=0;attempt<15;attempt++){response=await sb.functions.invoke('influencer-discovery',{body:{keyword,niche,country,follower_range,similar_url:similar||null,platforms,result_count,workspace_id:workspace.id,runs}});if(requestGeneration!==influencerSearchGeneration)return;if(response.error||response.data?.error)break;allCreators=[...new Map([...allCreators,...(response.data?.influencers||[])].map(c=>[c.profile_url,c])).values()];notice=[notice,response.data?.notice].filter(Boolean).join(' ');runs=response.data?.pending_runs||[];if(!runs.length)break;msg.textContent='Collecting '+runs.map(x=>x.platform).join(' and ')+' profiles… ('+(attempt+1)+'/15)';await new Promise(resolve=>setTimeout(resolve,5000));}if(response?.data&&!response.error){response.data.influencers=allCreators;response.data.notice=notice+(runs?.length?' Some Apify collections are still running. Please search again shortly.':'');}if(requestGeneration!==influencerSearchGeneration)return;if(response.error){let detail=response.error.message||'Request failed';try{const payload=await response.error.context?.json();detail=payload?.details||payload?.error||detail}catch{}throw new Error(detail)}if(response.data?.error)throw new Error(response.data.details||response.data.error);const creators=Array.isArray(response.data?.influencers)?response.data.influencers:[];influencerCurrentResults=creators;influencerCurrentFilters={keyword,niche,country,follower_range,similar_url:similar,platforms,result_count};document.getElementById('infSavePanel')?.classList.toggle('hidden',!creators.length);if(creators.length){document.getElementById('infListTitle').value='';document.getElementById('infSaveStatus').textContent=''}msg.textContent=(creators.length?creators.length+' matching public profiles found (requested up to '+result_count+')'+(country?' for '+document.getElementById('infCountry').selectedOptions[0].text:'')+'.':'No matching verified profiles returned.')+(similar?' Similar-account matching is not supported; results are based on keyword/niche, not the supplied URL.':'')+(response.data?.notice?' '+response.data.notice:'');results.innerHTML=creators.length?infCardGrid(infProfileMarkup(creators)):'<div class="card"><p class="muted">Try a broader topic or another platform.</p></div>'}catch(e){if(requestGeneration!==influencerSearchGeneration)return;console.error('Influencer discovery failed:',e);msg.textContent='Influencer search failed: '+(e?.message||'Unexpected error')+'. Try again or check your search filters.';influencerCurrentResults=[];document.getElementById('infSavePanel')?.classList.add('hidden');results.innerHTML='<div class="card"><p class="muted">No verified profiles returned. Review the error above; the discovery provider may be unavailable or the search may have failed.</p></div>'}}
+function infBalancedResults(creators,platforms,limit){
+ const unique=[...new Map(creators.map(c=>[c.profile_url,c])).values()];
+ const groups=platforms.map(p=>unique.filter(c=>c.platform===p)),out=[];
+ for(let i=0;out.length<limit&&groups.some(g=>g[i]);i++)for(const group of groups)if(group[i]&&out.length<limit)out.push(group[i]);
+ return out;
+}
+async function discoverInfluencers(continuation=null){
+ const requestGeneration=++influencerSearchGeneration;
+ const filters=continuation?.filters||{
+  keyword:document.getElementById('infKeyword').value.trim(),niche:document.getElementById('infNiche').value,
+  country:document.getElementById('infCountry').value,follower_range:document.getElementById('infMinFollowers').value,
+  similar_url:document.getElementById('infSimilar').value.trim(),result_count:Number(document.getElementById('infResultCount').value),
+  platforms:[...document.querySelectorAll('.infPlatform:checked')].map(x=>x.value),workspace_id:workspace.id
+ };
+ const {keyword,niche,country,similar_url:similar,result_count,platforms}=filters;
+ const msg=document.getElementById('infMessage'),results=document.getElementById('infResults');
+ msg.classList.remove('hidden');
+ if((!keyword&&!niche&&!similar)||!platforms.length){msg.textContent='Enter a topic or similar profile and choose at least one platform.';return}
+ if(!Number.isInteger(result_count)||result_count<1||result_count>100){msg.textContent='Choose 1 to 100 total profiles.';return}
+ if(similar){try{const u=new URL(similar);if(!['https:','http:'].includes(u.protocol))throw Error('invalid')}catch{msg.textContent='Enter a valid public profile URL.';return}}
+ if(similar&&!keyword&&!niche){msg.textContent='Similar-account discovery is not currently supported. Add a keyword or niche to search for creators instead.';return}
+ influencerCurrentResults=[];influencerCurrentFilters=null;document.getElementById('infSavePanel')?.classList.add('hidden');
+ msg.textContent='Searching selected platforms…';results.innerHTML='<div class="card"><p class="muted">Collecting public creator profiles. Instagram and LinkedIn collections may take a few minutes…</p></div>';
+ let runs=continuation?.runs||null,allCreators=continuation?.creators||[],notices=new Set(continuation?.notices||[]),failure='';
+ try{
+  for(let attempt=0;attempt<40;attempt++){
+   if(requestGeneration!==influencerSearchGeneration)return;
+   const response=await sb.functions.invoke('influencer-discovery',{body:{...filters,runs}});
+   if(requestGeneration!==influencerSearchGeneration)return;
+   if(response.error){let detail=response.error.message||'Request failed';try{const payload=await response.error.context?.json();detail=payload?.details||payload?.error||detail}catch{}throw Error(detail)}
+   if(response.data?.error)throw Error(response.data.details||response.data.error);
+   allCreators=[...new Map([...allCreators,...(response.data?.influencers||[])].map(c=>[c.profile_url,c])).values()];
+   if(response.data?.notice)notices.add(response.data.notice);
+   runs=response.data?.pending_runs||[];
+   const visible=infBalancedResults(allCreators,platforms,result_count);
+   results.innerHTML=visible.length?infCardGrid(infProfileMarkup(visible)):'<div class="card"><p class="muted">Waiting for matching profiles…</p></div>';
+   if(!runs.length)break;
+   msg.textContent=visible.length+' profiles found so far. Still collecting '+runs.map(x=>x.platform).join(' and ')+'…';
+   if(attempt<39)await new Promise(resolve=>setTimeout(resolve,5000));
+  }
+ }catch(e){if(requestGeneration!==influencerSearchGeneration)return;failure='Search could not finish: '+(e?.message||'Unexpected error')+'.';}
+ if(requestGeneration!==influencerSearchGeneration)return;
+ const creators=infBalancedResults(allCreators,platforms,result_count);
+ influencerCurrentResults=creators;influencerCurrentFilters=filters;
+ document.getElementById('infSavePanel')?.classList.toggle('hidden',!creators.length);
+ if(creators.length){document.getElementById('infListTitle').value='';document.getElementById('infSaveStatus').textContent=''}
+ const counts=platforms.map(p=>p+': '+creators.filter(c=>c.platform===p).length).join(' · ');
+ const pending=Array.isArray(runs)&&runs.length>0;
+ msg.textContent=creators.length+' of '+result_count+' requested total profiles found. '+counts+'. '
+  +(pending?'Collection is still running. Continue checking to retrieve the remaining results. ':!failure&&creators.length<result_count?'Fewer matching profiles were returned within the search limit. Try a broader keyword or less restrictive filters. ':'')
+  +(similar?'Results use keyword/niche; similar-account matching is not supported. ':'')+[...notices].join('; ')+(failure?' '+failure:'');
+ results.innerHTML=(creators.length?infCardGrid(infProfileMarkup(creators)):'<div class="card"><p class="muted">No matching verified profiles returned. Review the platform status above.</p></div>')
+  +(pending?'<button class="btn secondary" id="infContinueSearch" style="margin-top:16px">Continue checking collection</button>':'');
+ const next=document.getElementById('infContinueSearch');if(pending&&next)next.onclick=()=>discoverInfluencers({filters,runs,creators:allCreators,notices:[...notices]});
+}
 
 const infColors=['#24204d','#103b45','#403019','#3e223e','#193b2c','#3e262a','#243850','#393020'];
 function infProfileMarkup(creators){return creators.map((c,i)=>{let u;try{u=new URL(c.profile_url);if(!['http:','https:'].includes(u.protocol))return ''}catch{return ''}const bg=infColors[i%infColors.length];return '<article class="card" style="box-sizing:border-box;width:100%;min-width:0;min-height:190px;background:'+bg+';border:1px solid #8888aa;border-radius:16px;padding:22px;display:flex;flex-direction:column;gap:12px;justify-content:space-between"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap"><div style="min-width:0;flex:1"><span class="pill">'+esc(c.platform||'Creator')+'</span><h3 style="color:white;margin:12px 0 4px;overflow-wrap:anywhere;font-size:19px">'+esc(c.name||c.handle||'Public creator')+'</h3><p style="color:#ddd;margin:0;overflow-wrap:anywhere">'+esc(c.niche||'Niche not available')+'</p></div><div style="flex-shrink:0;text-align:right"><div style="color:white;font-weight:750;font-size:23px">'+esc(c.followers??'N/A')+'</div><div style="color:#ddd;font-size:12px">followers / subscribers</div></div></div><a style="color:white;text-decoration:underline;overflow-wrap:anywhere;align-self:flex-start;margin-top:auto" href="'+esc(u.href)+'" target="_blank" rel="noopener noreferrer">Open profile ↗</a></article>'}).join('')}
