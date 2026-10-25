@@ -10,9 +10,21 @@ Deno.serve(async req=>{
  const auth=req.headers.get('Authorization');if(!auth)return reply({error:'Sign in first.'},401);
  const sb=createClient(Deno.env.get('SUPABASE_URL')!,Deno.env.get('SUPABASE_ANON_KEY')!,{global:{headers:{Authorization:auth}}});
  const {data:{user},error}=await sb.auth.getUser();if(error||!user)return reply({error:'Sign in again.'},401);
- const body=await req.json();const {data:ws}=await sb.from('workspaces').select('id').eq('id',body.workspace_id).single();const section=body.action==='ad'||(body.context==='ads'&&['image','video_submit','video_status','capabilities'].includes(body.action))?'ads':body.action==='plan'?'socialmanage':'posting';const {data:access}=await sb.rpc('has_workspace_access',{w:body.workspace_id,section_name:section,write_access:body.action!=='capabilities'});if(!ws||!access)return reply({error:'Workspace access denied.'},403);
+ const body=await req.json();const {data:ws}=await sb.from('workspaces').select('id').eq('id',body.workspace_id).single();const section=body.action==='ad'||body.action==='ad_history_delete'||(body.context==='ads'&&['image','video_submit','video_status','capabilities'].includes(body.action))?'ads':body.action==='plan'?'socialmanage':'posting';const {data:access}=await sb.rpc('has_workspace_access',{w:body.workspace_id,section_name:section,write_access:body.action!=='capabilities'});if(!ws||!access)return reply({error:'Workspace access denied.'},403);
  const key=Deno.env.get('OPENAI_API_KEY');if(body.action==='capabilities')return reply({content:!!key,images:!!key,video:!!Deno.env.get('FAL_KEY'),video_provider:'fal.ai',video_model:VIDEO_MODEL,publishing:false});
  const admin=createClient(Deno.env.get('SUPABASE_URL')!,Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
+ if(body.action==='ad_history_delete'){
+ const id=String(body.id||'');if(!/^[0-9a-f-]{36}$/i.test(id))return reply({error:'Valid ad ID required.'},400);
+ const found=await admin.from('ad_generations').select('id,assets,package').eq('id',id).eq('workspace_id',body.workspace_id).eq('created_by',user.id).maybeSingle();
+ if(found.error)return reply({error:'Could not read saved ad.'},502);if(!found.data)return reply({deleted:true});
+ const jobId=found.data.package?.job?.job_id;
+ if(jobId){const job=await admin.from('video_generation_jobs').select('status').eq('id',jobId).eq('workspace_id',body.workspace_id).eq('created_by',user.id).maybeSingle();if(job.error)return reply({error:'Could not verify video job status.'},502);if(job.data&&['submitting','queued','running','submission_unknown'].includes(job.data.status))return reply({error:'Finish or resolve this video job before deleting its saved ad.'},409);}
+ const prefix=user.id+'/ad-history/'+id+'/';
+ const paths=(Array.isArray(found.data.assets)?found.data.assets:[]).map((a:any)=>a.path).filter((p:unknown)=>typeof p==='string'&&p.startsWith(prefix)&&!p.includes('..'));
+ if(paths.length){const removed=await admin.storage.from('post-media').remove(paths);if(removed.error)return reply({error:'Could not remove saved assets. Your ad is still in history; retry deleting.'},502);}
+ const removed=await admin.from('ad_generations').delete().eq('id',id).eq('workspace_id',body.workspace_id).eq('created_by',user.id);if(removed.error)return reply({error:'Could not delete history entry. Retry deleting.'},502);
+ return reply({deleted:true});
+ }
  if(String(body.action).startsWith('video_'))return await handleVideo(body,admin,user.id,Deno.env.get('FAL_KEY'),reply);
  if(!key)return reply({error:'OpenAI generation is not configured. Add OPENAI_API_KEY to the Supabase function secrets.'},503);
  if(!formats[body.platform]||(body.action!=='ad'&&!formats[body.platform]?.includes(body.format)))return reply({error:'Unsupported channel or format.'},400);
